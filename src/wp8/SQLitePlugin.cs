@@ -1,23 +1,23 @@
 ﻿/*
- * PhoneGap is available under *either* the terms of the modified BSD license *or* the
- * MIT License (2008). See http://opensource.org/licenses/alphabetical for full text.
- *
- * Copyright (c) 2005-2011, Nitobi Software Inc.
- * Copyright (c) 2011, Microsoft Corporation
- */
-using System.Dynamic;
-using SQLite;
+* PhoneGap is available under *either* the terms of the modified BSD license *or* the
+* MIT License (2008). See http://opensource.org/licenses/alphabetical for full text.
+*
+* Copyright (c) 2005-2011, Nitobi Software Inc.
+* Copyright (c) 2011, Microsoft Corporation
+*/
 using System;
-using System.Linq;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Dynamic;
+using System.Linq;
 using System.Runtime.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading;
+using Newtonsoft.Json.Linq;
+using SQLite;
 using WPCordovaClassLib.Cordova;
 using WPCordovaClassLib.Cordova.Commands;
 using WPCordovaClassLib.Cordova.JSON;
-using Newtonsoft.Json.Linq;
 
 namespace Cordova.Extension.Commands
 {
@@ -41,6 +41,7 @@ namespace Cordova.Extension.Commands
 
 			[DataMember]
 			private string name;
+
 			[DataMember]
 			private string dbname;
 		}
@@ -58,20 +59,13 @@ namespace Cordova.Extension.Commands
 		[CollectionDataContract]
 		public class TransactionsCollection : Collection<SQLitePluginTransaction>
 		{
-
 		}
 
 		[DataContract]
 		public class SQLitePluginTransaction
 		{
 			/// <summary>
-			/// Identifier for transaction
-			/// </summary>
-			//[DataMember(IsRequired = true, Name = "trans_id")]
-			//public string TransId { get; set; }
-
-			/// <summary>
-			/// Identifier for transaction
+			/// Identifier for query
 			/// </summary>
 			[DataMember(IsRequired = true, Name = "qid")]
 			public string QueryId { get; set; }
@@ -87,7 +81,6 @@ namespace Cordova.Extension.Commands
 			/// </summary>
 			[DataMember(IsRequired = true, Name = "params")]
 			public string[] QueryParams { get; set; }
-
 		}
 
 		[DataContract]
@@ -95,9 +88,11 @@ namespace Cordova.Extension.Commands
 		{
 			[DataMember(Name = "rows")]
 			public List<object> Rows { get; set; }
+
 			[DataMember(Name = "rowsAffected")]
 			public int RowsAffected { get; set; }
-			[DataMember(Name="insertId")]
+
+			[DataMember(Name = "insertId")]
 			public long? LastInsertId { get; set; }
 		}
 
@@ -106,16 +101,18 @@ namespace Cordova.Extension.Commands
 		{
 			[DataMember(Name = "qid")]
 			public string QueryId { get; set; }
+
 			[DataMember(Name = "result")]
 			public SQLiteQueryRowSpecial ResultRows;
+
 			[DataMember(Name = "type")]
 			public string Type { get; set; }
 		}
 
 		#endregion
+
 		private SQLitePluginOpenCloseOptions dbOptions = new SQLitePluginOpenCloseOptions();
 		private readonly AutoResetEvent signal = new AutoResetEvent(false);
-		private SQLiteConnection dbConnection;
 
 		//we don't actually open here, we will do this with each db transaction
 		public void open(string options)
@@ -149,13 +146,8 @@ namespace Cordova.Extension.Commands
 		public void close(string options)
 		{
 			System.Diagnostics.Debug.WriteLine("SQLitePlugin.close()");
+			this.dbOptions = new SQLitePluginOpenCloseOptions();
 
-			if (this.dbConnection != null)
-			{
-				this.dbConnection.Close();
-			}
-
-			this.dbConnection = null;
 			var callbackId = JsonHelper.Deserialize<string[]>(options)[1];
 			this.DispatchCommandResult(new PluginResult(PluginResult.Status.OK), callbackId);
 		}
@@ -163,15 +155,13 @@ namespace Cordova.Extension.Commands
 		public void executeSqlBatch(string options)
 		{
 			var callOptions = JsonHelper.Deserialize<List<string>>(options);
-			var results = new List<SQLiteQueryResult>();
 			var dbName = string.Empty;
 
 			try
 			{
 				var executeSqlBatchOptions = JsonHelper.Deserialize<SQLitePluginExecuteSqlBatchOptions>(callOptions[0]);
 
-				dbName = !string.IsNullOrWhiteSpace(executeSqlBatchOptions.DbArgs.DBName) ?
-					executeSqlBatchOptions.DbArgs.DBName : this.dbOptions.DBName;
+				dbName = !string.IsNullOrWhiteSpace(executeSqlBatchOptions.DbArgs.DBName) ? executeSqlBatchOptions.DbArgs.DBName : this.dbOptions.DBName;
 
 				if (string.IsNullOrWhiteSpace(dbName))
 				{
@@ -184,41 +174,38 @@ namespace Cordova.Extension.Commands
 					}
 				}
 
-				if (this.dbConnection == null)
+				var results = new List<SQLiteQueryResult>();
+				using (var dbConnection = new SQLiteConnection(dbName))
 				{
-					this.dbConnection = new SQLiteConnection(dbName);
-				}
-
-				this.dbConnection.RunInTransaction(() =>
-				{
-					foreach (SQLitePluginTransaction transaction in executeSqlBatchOptions.Transactions)
+					dbConnection.RunInTransaction(() =>
 					{
-						var queryResult = new SQLiteQueryResult();
-						queryResult.QueryId = transaction.QueryId;
-						queryResult.Type = "success";
-						queryResult.ResultRows = new SQLiteQueryRowSpecial();
+						foreach (var transaction in executeSqlBatchOptions.Transactions)
+						{
+							var queryResult = new SQLiteQueryResult();
+							queryResult.QueryId = transaction.QueryId;
+							queryResult.Type = "success";
+							queryResult.ResultRows = new SQLiteQueryRowSpecial();
 
-						System.Diagnostics.Debug.WriteLine("queryId: " + transaction.QueryId + /*" transId: " + transaction.TransId + */" query: " + transaction.Query);
-						var first = transaction.Query.IndexOf("DROP TABLE", StringComparison.OrdinalIgnoreCase);
-						if (first != -1)
-						{
-							//-- bug where drop tabe does not work
-							transaction.Query = Regex.Replace(transaction.Query, "DROP TABLE IF EXISTS", "DELETE FROM", RegexOptions.IgnoreCase);
-							transaction.Query = Regex.Replace(transaction.Query, "DROP TABLE", "DELETE FROM", RegexOptions.IgnoreCase);
-							//--
-							this.dbConnection.Execute(transaction.Query, transaction.QueryParams);
-							//TODO call the callback function if there is a query_id							
-						}
-						else
-						{
-							//--if the transaction contains only of COMMIT or ROLLBACK query - do not execute it - there is no point as RunInTransaction is releaseing savepoint at its end.
-							//--So if COMMIT or ROLLBACK by itself is executed then there will be nothing to release and exception will occur.
-							if (transaction.Query.Trim().ToLower() != "commit" && transaction.Query.Trim().ToLower() != "rollback")
+							System.Diagnostics.Debug.WriteLine("queryId: " + transaction.QueryId + /*" transId: " + transaction.TransId + */" query: " + transaction.Query);
+							var first = transaction.Query.IndexOf("DROP TABLE", StringComparison.OrdinalIgnoreCase);
+							if (first != -1)
 							{
-
-								queryResult.ResultRows.Rows = this.dbConnection.Query2(transaction.Query, transaction.QueryParams)
-									.Select(sqliteRow => sqliteRow.column)
-									.Select(rowColumns =>
+								//-- bug where drop tabe does not work
+								transaction.Query = Regex.Replace(transaction.Query, "DROP TABLE IF EXISTS", "DELETE FROM", RegexOptions.IgnoreCase);
+								transaction.Query = Regex.Replace(transaction.Query, "DROP TABLE", "DELETE FROM", RegexOptions.IgnoreCase);
+								//--
+								dbConnection.Execute(transaction.Query, transaction.QueryParams);
+								//TODO call the callback function if there is a query_id
+							}
+							else
+							{
+								//--if the transaction contains only of COMMIT or ROLLBACK query - do not execute it - there is no point as RunInTransaction is releaseing savepoint at its end.
+								//--So if COMMIT or ROLLBACK by itself is executed then there will be nothing to release and exception will occur.
+								if (transaction.Query.Trim().ToLower() != "commit" && transaction.Query.Trim().ToLower() != "rollback")
+								{
+									queryResult.ResultRows.Rows = dbConnection.Query2(transaction.Query, transaction.QueryParams)
+										.Select(sqliteRow => sqliteRow.column)
+										.Select(rowColumns =>
 										{
 											IDictionary<string, object> result = new ExpandoObject();
 											foreach (var column in rowColumns)
@@ -227,21 +214,24 @@ namespace Cordova.Extension.Commands
 											}
 											return (object)result;
 										})
-									.ToList();
+										.ToList();
+								}
+
+								queryResult.ResultRows.RowsAffected = SQLite3.Changes(dbConnection.Handle);
+								queryResult.ResultRows.LastInsertId = SQLite3.LastInsertRowid(dbConnection.Handle);
 							}
 
-							queryResult.ResultRows.RowsAffected = SQLite3.Changes(this.dbConnection.Handle);
-							queryResult.ResultRows.LastInsertId = SQLite3.LastInsertRowid(this.dbConnection.Handle);
-						}
+							if (results == null)
+							{
+								results = new List<SQLiteQueryResult>();
+							}
 
-						if (results == null)
-						{
-							results = new List<SQLiteQueryResult>();
+							results.Add(queryResult);
 						}
+					});
 
-						results.Add(queryResult);
-					}
-				});
+					dbConnection.Close();
+				}
 
 				this.DispatchCommandResult(new PluginResult(PluginResult.Status.OK, JValue.FromObject(results).ToString()), callOptions[1]);
 			}
